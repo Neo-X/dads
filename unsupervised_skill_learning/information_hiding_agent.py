@@ -59,6 +59,7 @@ class InformationHidingAgent(sac_agent.SacAgent):
                reweigh_batches=False,
                agent_graph=None,
                skill_dynamics_graph=None,
+               information_hiding_weight=0.001,
                *sac_args,
                **sac_kwargs):
     self._skill_dynamics_learning_rate = skill_dynamics_learning_rate
@@ -68,6 +69,7 @@ class InformationHidingAgent(sac_agent.SacAgent):
     self._save_directory = save_directory
     self._restrict_input_size = restrict_input_size
     self._process_observation = observation_modify_fn
+    self._information_hiding_weight = information_hiding_weight
 
     if agent_graph is None:
       self._graph = tf.compat.v1.get_default_graph()
@@ -212,12 +214,12 @@ class InformationHidingAgent(sac_agent.SacAgent):
   def build_observation_processor_graph(self):
     self._observation_processor.make_placeholders()
     self._observation_processor.build_graph()
-    self._observation_processor.increase_prob_op(
-        learning_rate=self._skill_dynamics_learning_rate)
 
   def create_savers(self):
     self._skill_dynamics.create_saver(
         save_prefix=os.path.join(self._save_directory, 'dynamics'))
+    self._observation_processor.create_saver(
+        save_prefix=os.path.join(self._save_directory, 'processor'))
 
   def set_sessions(self, initialize_or_restore_skill_dynamics, session=None):
     if session is not None:
@@ -227,9 +229,13 @@ class InformationHidingAgent(sac_agent.SacAgent):
     self._skill_dynamics.set_session(
         initialize_or_restore_variables=initialize_or_restore_skill_dynamics,
         session=session)
+    self._observation_processor.set_session(
+        initialize_or_restore_variables=initialize_or_restore_skill_dynamics,
+        session=session)
 
   def save_variables(self, global_step):
     self._skill_dynamics.save_variables(global_step=global_step)
+    self._observation_processor.save_variables(global_step=global_step)
 
   def _get_dict(self, trajectories, batch_size=-1):
     tf.nest.assert_same_structure(self.collect_data_spec, trajectories)
@@ -345,7 +351,7 @@ class InformationHidingAgent(sac_agent.SacAgent):
               self.observation_processor.log_probability)
           denominator -= tf.math.log(tf.cast(tf.shape(
               self.observation_processor.mean)[0], tf.float32))
-          actor_loss += self._actor_loss_weight * tf.reduce_mean(
+          actor_loss += self._information_hiding_weight * tf.reduce_mean(
               self.observation_processor.log_probability - denominator)
 
       tf.debugging.check_numerics(actor_loss, 'Actor loss is inf or nan.')

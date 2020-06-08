@@ -50,7 +50,7 @@ from tf_agents.specs import tensor_spec
 from tf_agents.utils import common
 from tf_agents.utils import nest_utils
 
-import dads_agent
+import information_hiding_agent
 
 from envs import skill_wrapper
 from envs import video_wrapper
@@ -1170,7 +1170,7 @@ def main(_):
     else:
       reweigh_batches_flag = False
 
-    agent = dads_agent.DADSAgent(
+    agent = information_hiding_agent.InformationHidingAgent(
         # DADS parameters
         save_dir,
         skill_dynamics_observation_size,
@@ -1248,6 +1248,7 @@ def main(_):
     # insert experience manually with relabelled rewards and skills
     agent.build_agent_graph()
     agent.build_skill_dynamics_graph()
+    agent.build_observation_processor_graph()
     agent.create_savers()
 
     # saving this way requires the saver to be out the object
