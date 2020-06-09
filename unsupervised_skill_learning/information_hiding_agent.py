@@ -25,17 +25,17 @@ sys.path.append(os.path.abspath('./'))
 
 import numpy as np
 import tensorflow as tf
+import tensorflow_probability as tfp
+from tensorflow_probability import distributions as tfpd
 
 from tf_agents.agents.sac import sac_agent
-from tf_agents.trajectories import trajectory
-from tf_agents.utils import object_identity
+from tf_agents.trajectories import trajectory, time_step
 from tf_agents.agents import tf_agent
 from tf_agents.agents.sac.sac_agent import SacLossInfo
 from tf_agents.policies import actor_policy
 
 import skill_dynamics
-import observation_processor
-import wrapped_policy
+
 
 nest = tf.nest
 
@@ -92,17 +92,21 @@ class InformationHidingAgent(sac_agent.SacAgent):
         reweigh_batches=reweigh_batches,
         graph=skill_dynamics_graph)
 
+    state_size = sac_kwargs['time_step_spec'].observation.shape[0]
+
+    def make_distribution_fn(t):
+        loc = t[..., :state_size]
+        scale_diag = tf.exp(t[..., state_size:])
+        return tfpd.MultivariateNormalDiag(loc=loc, scale_diag=scale_diag)
+
     # instantiate the observation processor
-    self._observation_processor = observation_processor.ObservationProcessor(
-        observation_size=skill_dynamics_observation_size,
-        restrict_observation=self._restrict_input_size,
-        normalize_observations=normalize_observations,
-        fc_layer_params=fc_layer_params,
-        network_type=network_type,
-        num_components=num_mixture_components,
-        fix_variance=fix_variance,
-        reweigh_batches=reweigh_batches,
-        graph=skill_dynamics_graph)
+    self._observation_processor = tf.keras.Sequential([
+        tf.keras.layers.Dense(256, input_shape=(state_size,)),
+        tf.keras.layers.ReLU(),
+        tf.keras.layers.Dense(256),
+        tf.keras.layers.ReLU(),
+        tf.keras.layers.Dense(state_size * 2),
+        tfp.layers.DistributionLambda(make_distribution_fn)])
 
     class WrappedPolicy(actor_policy.ActorPolicy):
 
@@ -114,13 +118,14 @@ class InformationHidingAgent(sac_agent.SacAgent):
 
         def _apply_actor_network(this, observation, step_type, policy_state,
                                  mask=None):
-            this._processor.build_graph(observation)
+            dist = this._processor(observation)
             return super(WrappedPolicy, this)._apply_actor_network(
-                this._processor.mean, step_type, policy_state, mask=mask)
+                dist.sample() if this._training else dist.mean(),
+                step_type, policy_state, mask=mask)
 
     super(InformationHidingAgent, self).__init__(
         *sac_args,
-        actor_policy_ctor=wrapped_policy.WrappedPolicy,
+        actor_policy_ctor=WrappedPolicy,
         **sac_kwargs)
     self._placeholders_in_place = False
 
@@ -211,15 +216,9 @@ class InformationHidingAgent(sac_agent.SacAgent):
     self._skill_dynamics.increase_prob_op(
         learning_rate=self._skill_dynamics_learning_rate)
 
-  def build_observation_processor_graph(self):
-    self._observation_processor.make_placeholders()
-    self._observation_processor.build_graph()
-
   def create_savers(self):
     self._skill_dynamics.create_saver(
         save_prefix=os.path.join(self._save_directory, 'dynamics'))
-    self._observation_processor.create_saver(
-        save_prefix=os.path.join(self._save_directory, 'processor'))
 
   def set_sessions(self, initialize_or_restore_skill_dynamics, session=None):
     if session is not None:
@@ -229,13 +228,9 @@ class InformationHidingAgent(sac_agent.SacAgent):
     self._skill_dynamics.set_session(
         initialize_or_restore_variables=initialize_or_restore_skill_dynamics,
         session=session)
-    self._observation_processor.set_session(
-        initialize_or_restore_variables=initialize_or_restore_skill_dynamics,
-        session=session)
 
   def save_variables(self, global_step):
     self._skill_dynamics.save_variables(global_step=global_step)
-    self._observation_processor.save_variables(global_step=global_step)
 
   def _get_dict(self, trajectories, batch_size=-1):
     tf.nest.assert_same_structure(self.collect_data_spec, trajectories)
@@ -313,17 +308,23 @@ class InformationHidingAgent(sac_agent.SacAgent):
           trajectory.experience_to_transitions(experience, squeeze_time_dim))
       actions = policy_steps.action
 
-      trainable_critic_variables = list(object_identity.ObjectIdentitySet(
+      trainable_critic_variables = list(
           self._critic_network_1.trainable_variables +
-          self._critic_network_2.trainable_variables))
+          self._critic_network_2.trainable_variables)
 
       with tf.GradientTape(watch_accessed_variables=False) as tape:
           assert trainable_critic_variables, ('No trainable critic variables to '
                                               'optimize.')
           tape.watch(trainable_critic_variables)
-          self.observation_processor.build_graph(timesteps=time_steps, is_training=True)
+          dist = self.observation_processor(time_steps.observation)
+          replaced_time_steps = time_step.TimeStep(
+              step_type=time_steps.step_type,
+              reward=time_steps.reward,
+              discount=time_steps.discount,
+              observation=dist.sample(),
+          )
           critic_loss = self._critic_loss_weight * self.critic_loss(
-              self.observation_processor.mean,
+              replaced_time_steps,
               actions,
               next_time_steps,
               td_errors_loss_fn=self._td_errors_loss_fn,
@@ -346,13 +347,15 @@ class InformationHidingAgent(sac_agent.SacAgent):
           actor_loss = self._actor_loss_weight * self.actor_loss(time_steps, weights=weights)
 
           # train the observation processor to hide information from the agent
-          self.observation_processor.build_graph(timesteps=time_steps, is_training=True)
-          denominator = tf.math.reduce_logsumexp(
-              self.observation_processor.log_probability)
-          denominator -= tf.math.log(tf.cast(tf.shape(
-              self.observation_processor.mean)[0], tf.float32))
-          actor_loss += self._information_hiding_weight * tf.reduce_mean(
-              self.observation_processor.log_probability - denominator)
+          dist = self.observation_processor(time_steps.observation)
+          samples = dist.sample()
+          b = tf.shape(samples)[0]
+          s = tf.shape(samples)[1]
+          samples = tf.reshape(tf.tile(dist.sample(), [b, 1]), [b, b, s])
+          logp = dist.log_prob(samples)
+          denominator = tf.math.reduce_logsumexp(logp, axis=0)
+          denominator -= tf.math.log(tf.cast(tf.shape(logp)[0], tf.float32))
+          actor_loss += self._information_hiding_weight * tf.reduce_mean(logp - denominator)
 
       tf.debugging.check_numerics(actor_loss, 'Actor loss is inf or nan.')
       actor_grads = tape.gradient(actor_loss, trainable_actor_variables + trainable_obs_proc_variables)
@@ -363,9 +366,15 @@ class InformationHidingAgent(sac_agent.SacAgent):
       with tf.GradientTape(watch_accessed_variables=False) as tape:
           assert alpha_variable, 'No alpha variable to optimize.'
           tape.watch(alpha_variable)
-          self.observation_processor.build_graph(timesteps=time_steps, is_training=True)
+          dist = self.observation_processor(time_steps.observation)
+          replaced_time_steps = time_step.TimeStep(
+              step_type=time_steps.step_type,
+              reward=time_steps.reward,
+              discount=time_steps.discount,
+              observation=dist.sample(),
+          )
           alpha_loss = self._alpha_loss_weight * self.alpha_loss(
-              self.observation_processor.mean, weights=weights)
+              replaced_time_steps, weights=weights)
       tf.debugging.check_numerics(alpha_loss, 'Alpha loss is inf or nan.')
       alpha_grads = tape.gradient(alpha_loss, alpha_variable)
       self._apply_gradients(alpha_grads, alpha_variable, self._alpha_optimizer)

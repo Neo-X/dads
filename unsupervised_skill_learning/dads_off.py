@@ -1248,7 +1248,6 @@ def main(_):
     # insert experience manually with relabelled rewards and skills
     agent.build_agent_graph()
     agent.build_skill_dynamics_graph()
-    agent.build_observation_processor_graph()
     agent.create_savers()
 
     # saving this way requires the saver to be out the object
