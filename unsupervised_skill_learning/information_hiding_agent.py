@@ -59,7 +59,7 @@ class InformationHidingAgent(sac_agent.SacAgent):
                reweigh_batches=False,
                agent_graph=None,
                skill_dynamics_graph=None,
-               information_hiding_weight=0.0,
+               information_hiding_weight=0.1,
                *sac_args,
                **sac_kwargs):
     self._skill_dynamics_learning_rate = skill_dynamics_learning_rate
@@ -346,7 +346,7 @@ class InformationHidingAgent(sac_agent.SacAgent):
           s = tf.shape(samples)[1]
           samples = tf.reshape(tf.tile(dist.sample(), [b, 1]), [b, b, s])
           logp = dist.log_prob(samples)
-          denominator = tf.math.reduce_logsumexp(logp, axis=1)
+          denominator = tf.math.reduce_logsumexp(logp, axis=0)
           denominator -= tf.math.log(tf.cast(tf.shape(logp)[0], tf.float32))
           actor_loss += self._information_hiding_weight * tf.reduce_mean(logp - denominator)
 
