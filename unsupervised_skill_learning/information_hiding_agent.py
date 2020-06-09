@@ -59,7 +59,7 @@ class InformationHidingAgent(sac_agent.SacAgent):
                reweigh_batches=False,
                agent_graph=None,
                skill_dynamics_graph=None,
-               information_hiding_weight=0.001,
+               information_hiding_weight=0.0,
                *sac_args,
                **sac_kwargs):
     self._skill_dynamics_learning_rate = skill_dynamics_learning_rate
@@ -316,15 +316,8 @@ class InformationHidingAgent(sac_agent.SacAgent):
           assert trainable_critic_variables, ('No trainable critic variables to '
                                               'optimize.')
           tape.watch(trainable_critic_variables)
-          dist = self.observation_processor(time_steps.observation)
-          replaced_time_steps = time_step.TimeStep(
-              step_type=time_steps.step_type,
-              reward=time_steps.reward,
-              discount=time_steps.discount,
-              observation=dist.sample(),
-          )
           critic_loss = self._critic_loss_weight * self.critic_loss(
-              replaced_time_steps,
+              time_steps,
               actions,
               next_time_steps,
               td_errors_loss_fn=self._td_errors_loss_fn,
@@ -353,7 +346,7 @@ class InformationHidingAgent(sac_agent.SacAgent):
           s = tf.shape(samples)[1]
           samples = tf.reshape(tf.tile(dist.sample(), [b, 1]), [b, b, s])
           logp = dist.log_prob(samples)
-          denominator = tf.math.reduce_logsumexp(logp, axis=0)
+          denominator = tf.math.reduce_logsumexp(logp, axis=1)
           denominator -= tf.math.log(tf.cast(tf.shape(logp)[0], tf.float32))
           actor_loss += self._information_hiding_weight * tf.reduce_mean(logp - denominator)
 
@@ -366,15 +359,8 @@ class InformationHidingAgent(sac_agent.SacAgent):
       with tf.GradientTape(watch_accessed_variables=False) as tape:
           assert alpha_variable, 'No alpha variable to optimize.'
           tape.watch(alpha_variable)
-          dist = self.observation_processor(time_steps.observation)
-          replaced_time_steps = time_step.TimeStep(
-              step_type=time_steps.step_type,
-              reward=time_steps.reward,
-              discount=time_steps.discount,
-              observation=dist.sample(),
-          )
           alpha_loss = self._alpha_loss_weight * self.alpha_loss(
-              replaced_time_steps, weights=weights)
+              time_steps, weights=weights)
       tf.debugging.check_numerics(alpha_loss, 'Alpha loss is inf or nan.')
       alpha_grads = tape.gradient(alpha_loss, alpha_variable)
       self._apply_gradients(alpha_grads, alpha_variable, self._alpha_optimizer)
