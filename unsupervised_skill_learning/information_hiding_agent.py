@@ -345,9 +345,13 @@ class InformationHidingAgent(sac_agent.SacAgent):
           b = tf.shape(samples)[0]
           s = tf.shape(samples)[1]
           samples = tf.reshape(tf.tile(dist.sample(), [b, 1]), [b, b, s])
-          logp = dist.log_prob(samples)
+          tf.debugging.check_numerics(samples, 'samples is inf or nan.')
+          logp = tf.clip_by_value(dist.log_prob(samples), -10.0, 10.0)
+          tf.debugging.check_numerics(logp, 'logp is inf or nan.')
           denominator = tf.math.reduce_logsumexp(logp, axis=0)
+          tf.debugging.check_numerics(denominator, 'denominator is inf or nan.')
           denominator -= tf.math.log(tf.cast(tf.shape(logp)[0], tf.float32))
+          tf.debugging.check_numerics(denominator, 'denominator is inf or nan.')
           actor_loss += self._information_hiding_weight * tf.reduce_mean(logp - denominator)
 
       tf.debugging.check_numerics(actor_loss, 'Actor loss is inf or nan.')
